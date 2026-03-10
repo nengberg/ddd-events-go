@@ -1,4 +1,4 @@
-# ddd-events
+# Events
 
 A generic event publishing and subscribing framework for Go, built on hexagonal architecture.
 It abstracts the underlying broker (Kafka, RabbitMQ, NATS, …) behind simple ports (interfaces)
@@ -35,10 +35,10 @@ outbox.Dispatcher  ──► OutboxStore (durable pending queue)
 
 | Package | Responsibility |
 |---|---|
-| `events` (root) | Core `Event` type, `Handler` func type, `EventDispatcher` port |
+| `events` (root) | Core `Event` type, `Handler` func type, `EventDispatcher` port, `New` / `Wrap` / `Unwrap` / `TypedHandler` helpers |
 | `outbox` | Outbox message, store port, outbox-backed `Dispatcher`, polling `Processor` |
 | `inbox` | Inbox message, store port, `Receiver` (writes to inbox), polling `Processor` |
-| `bus` | `Bus` — fan-out to multiple `Handler` functions per event type |
+| `bus` | `Bus` — fan-out to multiple `Handler` functions per event type, `Middleware` support |
 | `adapter/memory` | In-memory implementations of all stores and the broker dispatcher |
 
 ---
@@ -114,9 +114,9 @@ b        := bus.New()
 receiver := inbox.NewReceiver(inboxStore)
 broker.Subscribe("order.created", receiver.Receive)
 
-// Register domain handlers.
+// Register domain handlers (plain or typed).
 b.Subscribe("order.created", func(ctx context.Context, e events.Event) error {
-    // handle the event ...
+    // handle the raw event ...
     return nil
 })
 
@@ -124,11 +124,7 @@ b.Subscribe("order.created", func(ctx context.Context, e events.Event) error {
 publisher := outbox.NewDispatcher(outboxStore)
 
 // In your business logic (ideally inside the same DB transaction):
-publisher.Dispatch(ctx, events.Event{
-    ID:      uuid.New().String(),
-    Type:    "order.created",
-    Payload: payload,
-})
+publisher.Dispatch(ctx, events.New("order.created", payload, nil))
 
 // Start background processors.
 outboxProc := outbox.NewProcessor(outboxStore, broker,
@@ -138,6 +134,52 @@ inboxProc  := inbox.NewProcessor(inboxStore, b.Handle,
 
 go outboxProc.Run(ctx)
 go inboxProc.Run(ctx)
+```
+
+---
+
+## Typed domain events
+
+The framework keeps `Event.Payload` as `[]byte` so it stays broker-agnostic. Your application
+defines its own domain event structs, and the framework provides three helpers in the root
+package to remove the marshal/unmarshal boilerplate.
+
+```go
+// Your application defines its own event types — the framework never sees these.
+type OrderCreatedEvent struct {
+    OrderID    string `json:"order_id"`
+    CustomerID string `json:"customer_id"`
+    Amount     int64  `json:"amount"`
+}
+```
+
+**Publishing** — `events.Wrap` marshals the struct and calls `events.New` in one step:
+
+```go
+evt, err := events.Wrap("order.created", OrderCreatedEvent{
+    OrderID:    "ord-1",
+    CustomerID: "cust-A",
+    Amount:     9900,
+}, nil)
+publisher.Dispatch(ctx, evt)
+```
+
+**Subscribing** — `events.TypedHandler` deserializes the payload before calling your handler,
+so the handler body works with the concrete type directly:
+
+```go
+b.Subscribe("order.created", events.TypedHandler(func(ctx context.Context, e events.Event, data OrderCreatedEvent) error {
+    // data is fully typed — no json.Unmarshal in sight
+    fmt.Printf("order %s placed by %s\n", data.OrderID, data.CustomerID)
+    return nil
+}))
+```
+
+If you need the typed data outside a handler (e.g. in a test or a manual consumer), use
+`events.Unwrap` directly:
+
+```go
+data, err := events.Unwrap[OrderCreatedEvent](e)
 ```
 
 ---

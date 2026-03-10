@@ -23,14 +23,9 @@ func NewDispatcher(store Store) *Dispatcher {
 
 // Dispatch writes the event to the outbox. This is safe to call within a
 // database transaction alongside your business logic writes.
+// The event should be constructed with events.New to ensure ID and OccurredAt
+// are set before calling Dispatch.
 func (d *Dispatcher) Dispatch(ctx context.Context, event events.Event) error {
-	if event.ID == "" {
-		event.ID = uuid.New().String()
-	}
-	if event.OccurredAt.IsZero() {
-		event.OccurredAt = time.Now().UTC()
-	}
-
 	msg := Message{
 		ID:        uuid.New().String(),
 		Event:     event,

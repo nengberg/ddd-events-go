@@ -486,6 +486,93 @@ func TestFullFlow_MultipleSubscribersPerEventType(t *testing.T) {
 
 // ---- feature tests ----------------------------------------------------------
 
+// TestWrap_Unwrap verifies the round-trip: Wrap serializes a domain type into
+// an Event payload, Unwrap deserializes it back.
+func TestWrap_Unwrap(t *testing.T) {
+	type orderShipped struct {
+		OrderID    string `json:"order_id"`
+		TrackingID string `json:"tracking_id"`
+	}
+
+	original := orderShipped{OrderID: "ord-1", TrackingID: "track-42"}
+	evt, err := events.Wrap("order.shipped", original, map[string]string{"region": "eu"})
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	if evt.Type != "order.shipped" {
+		t.Errorf("unexpected type: %s", evt.Type)
+	}
+	if evt.ID == "" || evt.OccurredAt.IsZero() {
+		t.Error("expected ID and OccurredAt to be set by Wrap")
+	}
+
+	got, err := events.Unwrap[orderShipped](evt)
+	if err != nil {
+		t.Fatalf("Unwrap: %v", err)
+	}
+	if got != original {
+		t.Errorf("round-trip mismatch: got %+v, want %+v", got, original)
+	}
+}
+
+// TestTypedHandler shows how the application layer registers a domain-typed
+// handler without any marshal/unmarshal boilerplate in the handler body.
+func TestTypedHandler(t *testing.T) {
+	type paymentProcessed struct {
+		PaymentID string `json:"payment_id"`
+		Amount    int64  `json:"amount"`
+	}
+
+	var received []paymentProcessed
+
+	b := bus.New()
+	b.Subscribe("payment.processed", events.TypedHandler(func(_ context.Context, _ events.Event, data paymentProcessed) error {
+		received = append(received, data)
+		return nil
+	}))
+
+	// Publisher side: Wrap the domain struct into an Event.
+	payments := []paymentProcessed{
+		{PaymentID: "pay-1", Amount: 1000},
+		{PaymentID: "pay-2", Amount: 2500},
+	}
+	for _, p := range payments {
+		evt, err := events.Wrap("payment.processed", p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Handle(context.Background(), evt); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+	}
+
+	if len(received) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(received))
+	}
+	for i, want := range payments {
+		if received[i] != want {
+			t.Errorf("[%d] got %+v, want %+v", i, received[i], want)
+		}
+	}
+}
+
+// TestTypedHandler_UnmarshalError verifies that a malformed payload causes
+// TypedHandler to return an error rather than panic or silently drop data.
+func TestTypedHandler_UnmarshalError(t *testing.T) {
+	type myEvent struct{ Value int }
+
+	b := bus.New()
+	b.Subscribe("bad.event", events.TypedHandler(func(_ context.Context, _ events.Event, _ myEvent) error {
+		return nil
+	}))
+
+	malformed := events.Event{ID: "e1", Type: "bad.event", Payload: []byte(`not json`)}
+	if err := b.Handle(context.Background(), malformed); err == nil {
+		t.Error("expected error for malformed payload, got nil")
+	}
+}
+
 // TestNewEvent verifies that events.New populates ID, Type, Payload, Metadata,
 // and OccurredAt without the caller having to set them manually.
 func TestNewEvent(t *testing.T) {
